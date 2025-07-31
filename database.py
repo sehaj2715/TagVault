@@ -35,7 +35,7 @@ def init_db():
     """
     )
 
-    # Modify files table
+    # Create files table
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS files (
@@ -47,10 +47,32 @@ def init_db():
             file_type TEXT,
             telegram_file_category TEXT,
             caption TEXT,
-            tags TEXT,
             is_shared BOOLEAN DEFAULT 0,
             upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    """
+    )
+
+    # Create tags table
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tags (
+            tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag_name TEXT NOT NULL UNIQUE
+        )
+    """
+    )
+
+    # Create file_tags junction table
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS file_tags (
+            file_id TEXT NOT NULL,
+            tag_id INTEGER NOT NULL,
+            PRIMARY KEY (file_id, tag_id),
+            FOREIGN KEY (file_id) REFERENCES files (file_id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags (tag_id) ON DELETE CASCADE
         )
     """
     )
@@ -61,8 +83,10 @@ def init_db():
 def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption, tags):
     conn = sqlite3.connect("backup.db")
     c = conn.cursor()
+    
+    # Insert file into files table
     c.execute(
-        "INSERT INTO files (user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO files (user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             file_id,
@@ -71,22 +95,49 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
             file_type,
             telegram_file_category,
             caption,
-            ",".join(tags),
         ),
     )
+    
+    # Handle tags
+    for tag_name in tags:
+        # Insert tag into tags table if it doesn't exist, and get its ID
+        c.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name,))
+        c.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name,))
+        tag_id = c.fetchone()[0]
+        
+        # Link file and tag in file_tags table
+        c.execute("INSERT INTO file_tags (file_id, tag_id) VALUES (?, ?)", (file_id, tag_id))
+
     conn.commit()
     conn.close()
 
 
-def find_files(user_id, query):
+def find_files(user_id, query, limit=None, offset=0):
     conn = sqlite3.connect("backup.db")
     c = conn.cursor()
 
     search_term = f"%{query}%"
-    c.execute(
-        "SELECT file_id, file_name, file_type, telegram_file_category, tags FROM files WHERE user_id = ? AND (file_name LIKE ? OR file_extension LIKE ? OR tags LIKE ?)",
-        (user_id, search_term, search_term, search_term),
-    )
+    sql_query = """
+        SELECT DISTINCT f.file_id, f.file_name, f.file_type, f.telegram_file_category, GROUP_CONCAT(t.tag_name) AS tags
+        FROM files f
+        LEFT JOIN file_tags ft ON f.file_id = ft.file_id
+        LEFT JOIN tags t ON ft.tag_id = t.tag_id
+        WHERE f.user_id = ? AND (
+            f.file_name LIKE ? OR 
+            f.file_extension LIKE ? OR 
+            t.tag_name LIKE ?
+        )
+        GROUP BY f.file_id, f.file_name, f.file_type, f.telegram_file_category
+        ORDER BY f.upload_date DESC
+        """
+    params = [user_id, search_term, search_term, search_term]
+
+    if limit is not None:
+        sql_query += " LIMIT ? OFFSET ?"
+        params.append(limit)
+        params.append(offset)
+
+    c.execute(sql_query, tuple(params))
 
     files = c.fetchall()
     conn.close()
@@ -96,11 +147,21 @@ def find_files(user_id, query):
 def get_all_tags(user_id):
     conn = sqlite3.connect("backup.db")
     c = conn.cursor()
-    c.execute("SELECT tags FROM files WHERE user_id = ?", (user_id,))
-    tags_list = [row[0].split(",") for row in c.fetchall() if row[0]]
+    # Modified to select tags from the new tags table, linked via file_tags
+    c.execute(
+        """
+        SELECT DISTINCT t.tag_name
+        FROM tags t
+        JOIN file_tags ft ON t.tag_id = ft.tag_id
+        JOIN files f ON ft.file_id = f.file_id
+        WHERE f.user_id = ?
+        """,
+        (user_id,)
+    )
+    tags_list = [row[0] for row in c.fetchall()]
     conn.close()
-    # Flatten list and get unique tags
-    return sorted(list(set([tag for sublist in tags_list for tag in sublist])))
+    return sorted(list(set(tags_list)))
+
 
 def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=None, tag_operation=None):
     conn = sqlite3.connect("backup.db")
@@ -113,10 +174,19 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
         params.append(new_file_name)
     
     if tags_to_modify is not None and tag_operation is not None:
-        c.execute("SELECT tags FROM files WHERE user_id = ? AND file_id = ?", (user_id, file_id))
-        current_tags_str = c.fetchone()[0]
-        current_tags = set(current_tags_str.split(",")) if current_tags_str else set()
+        # Get current tags for the file
+        c.execute(
+            """
+            SELECT t.tag_name
+            FROM tags t
+            JOIN file_tags ft ON t.tag_id = ft.tag_id
+            WHERE ft.file_id = ?
+            """,
+            (file_id,)
+        )
+        current_tags = set([row[0] for row in c.fetchall()])
 
+        updated_tags = set()
         if tag_operation == "set":
             updated_tags = set(tags_to_modify)
         elif tag_operation == "add":
@@ -127,10 +197,22 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
             conn.close()
             return 0 # Invalid tag operation
 
-        update_fields.append("tags = ?")
-        params.append(",".join(sorted(list(updated_tags))))
+        # Remove old tags not in updated_tags
+        tags_to_remove = current_tags.difference(updated_tags)
+        for tag_name in tags_to_remove:
+            c.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name,))
+            tag_id = c.fetchone()[0]
+            c.execute("DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?", (file_id, tag_id))
 
-    if not update_fields:
+        # Add new tags not in current_tags
+        tags_to_add = updated_tags.difference(current_tags)
+        for tag_name in tags_to_add:
+            c.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name,))
+            c.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name,))
+            tag_id = c.fetchone()[0]
+            c.execute("INSERT INTO file_tags (file_id, tag_id) VALUES (?, ?)", (file_id, tag_id))
+
+    if not update_fields and (tags_to_modify is None or tag_operation is None): # Only return 0 if no actual updates were requested
         conn.close()
         return 0  # No fields to update
 
@@ -145,12 +227,21 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
     return rows_updated
 
 
-def get_recent_files(user_id, limit=10):
+def get_recent_files(user_id, limit=10, offset=0):
     conn = sqlite3.connect("backup.db")
     c = conn.cursor()
+    # Modified to join with file_tags and tags tables
     c.execute(
-        "SELECT file_id, file_name, file_type, telegram_file_category, tags FROM files WHERE user_id = ? ORDER BY upload_date DESC LIMIT ?",
-        (user_id, limit),
+        """
+        SELECT DISTINCT f.file_id, f.file_name, f.file_type, f.telegram_file_category, GROUP_CONCAT(t.tag_name) AS tags
+        FROM files f
+        LEFT JOIN file_tags ft ON f.file_id = ft.file_id
+        LEFT JOIN tags t ON ft.tag_id = t.tag_id
+        WHERE f.user_id = ?
+        GROUP BY f.file_id, f.file_name, f.file_type, f.telegram_file_category
+        ORDER BY f.upload_date DESC LIMIT ? OFFSET ?
+        """,
+        (user_id, limit, offset),
     )
     files = c.fetchall()
     conn.close()
@@ -161,11 +252,35 @@ def delete_files(user_id, query):
     conn = sqlite3.connect("backup.db")
     c = conn.cursor()
     search_term = f"%{query}%"
+    # Need to delete from file_tags first due to foreign key constraints
+    # Find file_ids to delete
     c.execute(
-        "DELETE FROM files WHERE user_id = ? AND (file_name LIKE ? OR file_extension LIKE ? OR tags LIKE ?)",
+        """
+        SELECT DISTINCT f.file_id
+        FROM files f
+        LEFT JOIN file_tags ft ON f.file_id = ft.file_id
+        LEFT JOIN tags t ON ft.tag_id = t.tag_id
+        WHERE f.user_id = ? AND (
+            f.file_name LIKE ? OR 
+            f.file_extension LIKE ? OR 
+            t.tag_name LIKE ?
+        )
+        """,
         (user_id, search_term, search_term, search_term),
     )
-    rows_deleted = c.rowcount
+    file_ids_to_delete = [row[0] for row in c.fetchall()]
+
+    rows_deleted = 0
+    if file_ids_to_delete:
+        # Delete from file_tags
+        for file_id in file_ids_to_delete:
+            c.execute("DELETE FROM file_tags WHERE file_id = ?", (file_id,))
+        
+        # Delete from files
+        placeholders = ', '.join(['?' for _ in file_ids_to_delete])
+        c.execute(f"DELETE FROM files WHERE user_id = ? AND file_id IN ({placeholders})", (user_id, *file_ids_to_delete))
+        rows_deleted = c.rowcount
+
     conn.commit()
     conn.close()
     return rows_deleted

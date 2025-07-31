@@ -162,21 +162,27 @@ async def list_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("You haven't used any tags yet.")
 
 
+PAGE_SIZE = 5 # Number of files to display per page
+
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /files command (formerly /my_files).
-    Displays a list of recently uploaded files by the current user, including their tags.
+    Displays a paginated list of recently uploaded files by the current user, including their tags.
     """
     user_id = update.effective_user.id
-    files = db.get_recent_files(user_id)  # Fetch recent files from the database
+    offset = context.args[0] if context.args and context.args[0].isdigit() else 0
+    offset = int(offset)
+
+    files = db.get_recent_files(user_id, limit=PAGE_SIZE, offset=offset)  # Fetch recent files from the database with pagination
+    
     if files:
-        await update.message.reply_text("Your recent files:")
+        await update.message.reply_text(f"Your recent files (Page {offset // PAGE_SIZE + 1}):")
         # Iterate through files and send them back to the user
         for file_id, file_name, file_type, telegram_file_category, tags_str in files:
             caption_text = file_name
             if tags_str:
                 # Display tags concisely within parentheses
-                caption_text += f" ({tags_str.replace(',', ', ')})"
+                caption_text += f" ({tags_str.replace(', ', ', ')})"
 
             # Use the stored telegram_file_category to send the file correctly
             if telegram_file_category == "photo":
@@ -197,6 +203,18 @@ async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     await update.message.reply_audio(file_id, caption=caption_text)
                 else:
                     await update.message.reply_document(file_id, caption=caption_text)
+        
+        # Add pagination buttons
+        keyboard = []
+        if offset > 0:
+            keyboard.append(InlineKeyboardButton("Previous", callback_data=f"files_page_{offset - PAGE_SIZE}"))
+        if len(files) == PAGE_SIZE:
+            keyboard.append(InlineKeyboardButton("Next", callback_data=f"files_page_{offset + PAGE_SIZE}"))
+        
+        if keyboard:
+            reply_markup = InlineKeyboardMarkup([keyboard])
+            await update.message.reply_text("", reply_markup=reply_markup)
+
     else:
         await update.message.reply_text("You haven't uploaded any files recently.")
 
@@ -226,9 +244,11 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for file_id, file_name, file_type, telegram_file_category, tags_str in files_to_delete:
         file_list_message += f"- {file_name} ({file_type})\n"
 
+    context.user_data['delete_query'] = query # Store the query for confirmation
+
     # Create inline keyboard for confirmation
     keyboard = [
-        [InlineKeyboardButton("Confirm Delete", callback_data=f"confirm_delete_{query}")],
+        [InlineKeyboardButton("Confirm Delete", callback_data="confirm_delete_action")],
         [InlineKeyboardButton("Cancel", callback_data="cancel_delete")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -351,26 +371,34 @@ async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     Handles text messages that are not commands.
     Performs a search for files based on the user's text query (filename, extension, or tags).
-    Displays matching files, including their tags.
+    Displays matching files, including their tags with pagination.
     """
     user_id = update.effective_user.id
     query = update.message.text # The entire text message is the search query
+    
+    # Store the query for pagination callbacks
+    context.user_data['last_search_query'] = query
+    
+    offset = 0 # Initial offset for search
+    if context.args and context.args[0].isdigit(): # Check if offset is provided in args (for callback)
+        offset = int(context.args[0])
+
     if not query:
         await update.message.reply_text(
             "Please provide a search query. E.g., `report.pdf`, `#meeting`, `image #vacation`"
         )
         return
 
-    files = db.find_files(user_id, query) # Find files in the database
+    files = db.find_files(user_id, query, limit=PAGE_SIZE, offset=offset) # Find files in the database with pagination
 
     if files:
-        await update.message.reply_text("Files matching your query:")
+        await update.message.reply_text(f"Files matching '{query}' (Page {offset // PAGE_SIZE + 1}):")
         # Iterate through files and send them back to the user
         for file_id, file_name, file_type, telegram_file_category, tags_str in files:
             caption_text = file_name
             if tags_str:
                 # Display tags concisely within parentheses
-                caption_text += f" ({tags_str.replace(',', ', ')})"
+                caption_text += f" ({tags_str.replace(', ', ', ')})"
 
             # Use the stored telegram_file_category to send the file correctly
             if telegram_file_category == "photo":
@@ -391,6 +419,18 @@ async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.message.reply_audio(file_id, caption=caption_text)
                 else:
                     await update.message.reply_document(file_id, caption=caption_text)
+        
+        # Add pagination buttons
+        keyboard = []
+        if offset > 0:
+            keyboard.append(InlineKeyboardButton("Previous", callback_data=f"search_page_{offset - PAGE_SIZE}"))
+        if len(files) == PAGE_SIZE:
+            keyboard.append(InlineKeyboardButton("Next", callback_data=f"search_page_{offset + PAGE_SIZE}"))
+        
+        if keyboard:
+            reply_markup = InlineKeyboardMarkup([keyboard])
+            await update.message.reply_text("", reply_markup=reply_markup)
+
     else:
         await update.message.reply_text(f"No files found matching '{query}'.")
 
@@ -414,10 +454,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     elif data == "help":
         await help_command(update, context) # Call the help command handler
-    elif data.startswith("confirm_delete_"):
-        # Extract the original query from the callback data
+    elif data == "confirm_delete_action": # Corrected to use the simple action string
         user_id = update.effective_user.id
-        original_query = data.replace("confirm_delete_", "")
+        original_query = context.user_data.get('delete_query') # Retrieve query from user_data
+        if not original_query:
+            await query.edit_message_text("Error: No delete query found. Please try again.")
+            return
         rows_deleted = db.delete_files(user_id, original_query) # Perform the deletion
         if rows_deleted > 0:
             await query.edit_message_text(f"Deleted {rows_deleted} file(s) matching '{original_query}'.")
@@ -425,6 +467,59 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(f"No files were deleted for query '{original_query}'.")
     elif data == "cancel_delete":
         await query.edit_message_text("File deletion cancelled.")
+    elif data.startswith("files_page_"):
+        user_id = update.effective_user.id
+        offset = int(data.replace("files_page_", ""))
+        files = db.get_recent_files(user_id, limit=PAGE_SIZE, offset=offset)
+        
+        if files:
+            message_text = f"Your recent files (Page {offset // PAGE_SIZE + 1}):\n"
+            for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+                caption_text = file_name
+                if tags_str:
+                    caption_text += f" ({tags_str.replace(', ', ', ')})"
+                message_text += f"- {caption_text}\n"
+
+            keyboard = []
+            if offset > 0:
+                keyboard.append(InlineKeyboardButton("Previous", callback_data=f"files_page_{offset - PAGE_SIZE}"))
+            if len(files) == PAGE_SIZE:
+                keyboard.append(InlineKeyboardButton("Next", callback_data=f"files_page_{offset + PAGE_SIZE}"))
+            
+            reply_markup = InlineKeyboardMarkup([keyboard])
+            await query.edit_message_text(message_text, reply_markup=reply_markup)
+        else:
+            await query.edit_message_text("No more files.")
+
+    elif data.startswith("search_page_"):
+        user_id = update.effective_user.id
+        offset = int(data.replace("search_page_", ""))
+        query_text = context.user_data.get('last_search_query')
+
+        if not query_text:
+            await query.edit_message_text("No search query found. Please start a new search.")
+            return
+
+        files = db.find_files(user_id, query_text, limit=PAGE_SIZE, offset=offset)
+
+        if files:
+            message_text = f"Files matching '{query_text}' (Page {offset // PAGE_SIZE + 1}):\n"
+            for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+                caption_text = file_name
+                if tags_str:
+                    caption_text += f" ({tags_str.replace(', ', ', ')})"
+                message_text += f"- {caption_text}\n"
+
+            keyboard = []
+            if offset > 0:
+                keyboard.append(InlineKeyboardButton("Previous", callback_data=f"search_page_{offset - PAGE_SIZE}"))
+            if len(files) == PAGE_SIZE:
+                keyboard.append(InlineKeyboardButton("Next", callback_data=f"search_page_{offset + PAGE_SIZE}"))
+            
+            reply_markup = InlineKeyboardMarkup([keyboard])
+            await query.edit_message_text(message_text, reply_markup=reply_markup)
+        else:
+            await query.edit_message_text("No more files for this search.")
 
 
 def main() -> None:
