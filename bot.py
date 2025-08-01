@@ -522,6 +522,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("No more files for this search.")
 
 
+from web_server import start_web_server_thread
+
 def main() -> None:
     """
     Main function to set up and run the Telegram bot.
@@ -529,6 +531,9 @@ def main() -> None:
     """
     db.init_db()  # Initialize the SQLite database
     
+    # Start the web server in a separate thread
+    start_web_server_thread()
+
     # Create the Application and pass your bot's token.
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
