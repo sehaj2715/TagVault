@@ -178,7 +178,7 @@ async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if files:
         await update.message.reply_text(f"Your recent files (Page {offset // PAGE_SIZE + 1}):")
         # Iterate through files and send them back to the user
-        for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+        for file_id, file_name, file_type, telegram_file_category, _, tags_str in files:
             caption_text = file_name
             if tags_str:
                 # Display tags concisely within parentheses
@@ -241,7 +241,7 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Prepare message listing files to be deleted
     file_list_message = "The following files will be deleted:\n"
-    for file_id, file_name, file_type, telegram_file_category, tags_str in files_to_delete:
+    for file_id, file_name, file_type, telegram_file_category, _, tags_str in files_to_delete:
         file_list_message += f"- {file_name} ({file_type})\n"
 
     context.user_data['delete_query'] = query # Store the query for confirmation
@@ -394,7 +394,7 @@ async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if files:
         await update.message.reply_text(f"Files matching '{query}' (Page {offset // PAGE_SIZE + 1}):")
         # Iterate through files and send them back to the user
-        for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+        for file_id, file_name, file_type, telegram_file_category, _, tags_str in files:
             caption_text = file_name
             if tags_str:
                 # Display tags concisely within parentheses
@@ -474,7 +474,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         if files:
             message_text = f"Your recent files (Page {offset // PAGE_SIZE + 1}):\n"
-            for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+            for file_id, file_name, file_type, telegram_file_category, _, tags_str in files:
                 caption_text = file_name
                 if tags_str:
                     caption_text += f" ({tags_str.replace(', ', ', ')})"
@@ -504,7 +504,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if files:
             message_text = f"Files matching '{query_text}' (Page {offset // PAGE_SIZE + 1}):\n"
-            for file_id, file_name, file_type, telegram_file_category, tags_str in files:
+            for file_id, file_name, file_type, telegram_file_category, _, tags_str in files:
                 caption_text = file_name
                 if tags_str:
                     caption_text += f" ({tags_str.replace(', ', ', ')})"
