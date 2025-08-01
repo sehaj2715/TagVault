@@ -1,11 +1,34 @@
 import psycopg2
+from psycopg2 import pool, extras
 from config import DATABASE_URL
 
-def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+# Global variable for the connection pool
+db_pool = None
 
 def init_db():
+    global db_pool
+    if db_pool is None:
+        try:
+            # Initialize a simple connection pool
+            db_pool = pool.SimpleConnectionPool(
+                minconn=1,  # Minimum number of connections in the pool
+                maxconn=10, # Maximum number of connections in the pool
+                dsn=DATABASE_URL
+            )
+            print("Database connection pool initialized.")
+        except Exception as e:
+            print(f"Error initializing connection pool: {e}")
+            raise
+
+def get_db_connection():
+    if db_pool is None:
+        raise Exception("Database pool not initialized. Call init_db() first.")
+    return db_pool.getconn()
+
+def put_db_connection(conn):
+    if db_pool is not None and conn is not None:
+        db_pool.putconn(conn)
+
     # In a production environment with Supabase, tables are typically created via migrations
     # or the Supabase UI. This function will primarily serve as a placeholder or for
     # initial setup if running locally against a fresh DB.
@@ -14,9 +37,11 @@ def init_db():
     pass
 
 def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption, tags):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         # Insert file into files table
         cur.execute(
             """
@@ -35,41 +60,55 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
         )
         
         # Handle tags
+        # Batch insert tags and file_tags
+        tag_data = []
+        file_tag_data = []
         for tag_name in tags:
-            # Insert tag into tags table if it doesn't exist, and get its ID
             cur.execute(
                 """
                 INSERT INTO tags (tag_name) VALUES (%s)
                 ON CONFLICT (tag_name) DO NOTHING
+                RETURNING tag_id
                 """,
                 (tag_name,)
             )
-            cur.execute("SELECT tag_id FROM tags WHERE tag_name = %s", (tag_name,))
-            tag_id = cur.fetchone()[0]
-            
-            # Link file and tag in file_tags table
-            cur.execute(
+            tag_id = cur.fetchone()
+            if tag_id: # If tag was actually inserted, use its ID
+                tag_id = tag_id[0]
+            else: # If tag already existed, fetch its ID
+                cur.execute("SELECT tag_id FROM tags WHERE tag_name = %s", (tag_name,))
+                tag_id = cur.fetchone()[0]
+            file_tag_data.append((file_id, tag_id))
+
+        if file_tag_data:
+            psycopg2.extras.execute_values(
+                cur,
                 """
-                INSERT INTO file_tags (file_id, tag_id) VALUES (%s, %s)
+                INSERT INTO file_tags (file_id, tag_id) VALUES %s
                 ON CONFLICT (file_id, tag_id) DO NOTHING
                 """,
-                (file_id, tag_id)
+                file_tag_data
             )
 
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error adding file: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def find_files(user_id, query, limit=None, offset=0):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         search_term = f"%{query}%"
         sql_query = """
             SELECT DISTINCT f.file_id, f.file_name, f.file_type, f.telegram_file_category, f.upload_date, STRING_AGG(t.tag_name, ', ') AS tags
@@ -98,14 +137,18 @@ def find_files(user_id, query, limit=None, offset=0):
         print(f"Error finding files: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def get_all_tags(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             """
             SELECT DISTINCT t.tag_name
@@ -122,14 +165,18 @@ def get_all_tags(user_id):
         print(f"Error getting all tags: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=None, tag_operation=None):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         update_fields = []
         params = []
 
@@ -162,30 +209,43 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
 
             # Remove old tags not in updated_tags
             tags_to_remove = current_tags.difference(updated_tags)
-            for tag_name in tags_to_remove:
-                cur.execute("SELECT tag_id FROM tags WHERE tag_name = %s", (tag_name,))
-                tag_id = cur.fetchone()[0]
-                cur.execute("DELETE FROM file_tags WHERE file_id = %s AND tag_id = %s", (file_id, tag_id))
+            if tags_to_remove:
+                cur.execute("SELECT tag_id FROM tags WHERE tag_name IN %s", (tuple(tags_to_remove),))
+                tag_ids_to_remove = [row[0] for row in cur.fetchall()]
+                if tag_ids_to_remove:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        "DELETE FROM file_tags WHERE file_id = %s AND tag_id = %s",
+                        [(file_id, tag_id) for tag_id in tag_ids_to_remove]
+                    )
 
             # Add new tags not in current_tags
             tags_to_add = updated_tags.difference(current_tags)
-            for tag_name in tags_to_add:
-                cur.execute(
-                    """
-                    INSERT INTO tags (tag_name) VALUES (%s)
-                    ON CONFLICT (tag_name) DO NOTHING
-                    """,
-                    (tag_name,)
+            if tags_to_add:
+                # Insert new tags into tags table and get their IDs
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO tags (tag_name) VALUES %s ON CONFLICT (tag_name) DO NOTHING RETURNING tag_id, tag_name",
+                    [(tag_name,) for tag_name in tags_to_add]
                 )
-                cur.execute("SELECT tag_id FROM tags WHERE tag_name = %s", (tag_name,))
-                tag_id = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    INSERT INTO file_tags (file_id, tag_id) VALUES (%s, %s)
-                    ON CONFLICT (file_id, tag_id) DO NOTHING
-                    """,
-                    (file_id, tag_id)
-                )
+                # Fetch IDs for newly inserted tags and existing ones
+                cur.execute("SELECT tag_id, tag_name FROM tags WHERE tag_name IN %s", (tuple(tags_to_add),))
+                tag_id_map = {row[1]: row[0] for row in cur.fetchall()}
+
+                file_tag_data = []
+                for tag_name in tags_to_add:
+                    if tag_name in tag_id_map:
+                        file_tag_data.append((file_id, tag_id_map[tag_name]))
+                
+                if file_tag_data:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO file_tags (file_id, tag_id) VALUES %s
+                        ON CONFLICT (file_id, tag_id) DO NOTHING
+                        """,
+                        file_tag_data
+                    )
 
         if not update_fields and (tags_to_modify is None or tag_operation is None):
             return 0  # No fields to update
@@ -199,21 +259,30 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
         else:
             rows_updated = 0 # No direct file fields updated, only tags
 
+        # Update user's tag count after metadata update
+        new_tag_count = _get_user_unique_tag_count(user_id)
+        cur.execute("UPDATE users SET tag_count = %s WHERE user_id = %s", (new_tag_count, user_id))
+
         conn.commit()
         return rows_updated
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error updating file metadata: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def get_recent_files(user_id, limit=10, offset=0):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             """
             SELECT DISTINCT f.file_id, f.file_name, f.file_type, f.telegram_file_category, f.upload_date, STRING_AGG(t.tag_name, ', ') AS tags
@@ -232,14 +301,18 @@ def get_recent_files(user_id, limit=10, offset=0):
         print(f"Error getting recent files: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def delete_files(user_id, query):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         search_term = f"%{query}%"
         # Find file_ids to delete
         cur.execute(
@@ -260,33 +333,40 @@ def delete_files(user_id, query):
 
         rows_deleted = 0
         if file_ids_to_delete:
-            # Delete from file_tags (ON DELETE CASCADE on files table will handle this if file_id is primary key)
-            # However, since file_id is not the primary key of files table, we need to delete from file_tags explicitly
-            # or ensure the foreign key constraint is set up correctly.
-            # For now, explicit deletion from file_tags is safer.
-            for file_id in file_ids_to_delete:
-                cur.execute("DELETE FROM file_tags WHERE file_id = %s", (file_id,))
+            # Delete from file_tags
+            cur.execute("DELETE FROM file_tags WHERE file_id IN %s", (tuple(file_ids_to_delete),))
             
             # Delete from files
-            placeholders = ', '.join(['%s' for _ in file_ids_to_delete])
-            cur.execute(f"DELETE FROM files WHERE user_id = %s AND file_id IN ({placeholders})", (user_id, *file_ids_to_delete))
+            cur.execute("DELETE FROM files WHERE user_id = %s AND file_id IN %s", (user_id, tuple(file_ids_to_delete)))
             rows_deleted = cur.rowcount
+
+        # Update user's file count and tag count
+        new_file_count = _get_user_file_count(user_id)
+        cur.execute("UPDATE users SET upload_count = %s WHERE user_id = %s", (new_file_count, user_id))
+        
+        new_tag_count = _get_user_unique_tag_count(user_id)
+        cur.execute("UPDATE users SET tag_count = %s WHERE user_id = %s", (new_tag_count, user_id))
 
         conn.commit()
         return rows_deleted
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error deleting files: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def get_user(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
         user = cur.fetchone()
         return user
@@ -294,14 +374,18 @@ def get_user(user_id):
         print(f"Error getting user: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def add_user(user_id, username):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO users (user_id, username) VALUES (%s, %s)
@@ -311,61 +395,116 @@ def add_user(user_id, username):
         )
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error adding user: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def update_user_subscription(user_id, plan_name):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             "UPDATE users SET subscription_plan = %s WHERE user_id = %s", (plan_name, user_id)
         )
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error updating user subscription: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def record_upload(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             "UPDATE users SET upload_count = upload_count + 1, last_active = NOW() WHERE user_id = %s",
             (user_id,),
         )
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error recording upload: {e}")
         raise
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
 
 
 def record_tag_usage(user_id, num_tags):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(
             "UPDATE users SET tag_count = tag_count + %s, last_active = NOW() WHERE user_id = %s",
             (num_tags, user_id),
         )
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"Error recording tag usage: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            put_db_connection(conn)
+
+def _get_user_file_count(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM files WHERE user_id = %s", (user_id,))
+        count = cur.fetchone()[0]
+        return count
+    except Exception as e:
+        print(f"Error getting user file count: {e}")
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+def _get_user_unique_tag_count(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT t.tag_id)
+            FROM tags t
+            JOIN file_tags ft ON t.tag_id = ft.tag_id
+            JOIN files f ON ft.file_id = f.file_id
+            WHERE f.user_id = %s
+            """,
+            (user_id,)
+        )
+        count = cur.fetchone()[0]
+        return count
+    except Exception as e:
+        print(f"Error getting user unique tag count: {e}")
         raise
     finally:
         cur.close()
