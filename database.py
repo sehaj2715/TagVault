@@ -2,17 +2,15 @@ import psycopg2
 from psycopg2 import pool, extras
 from config import DATABASE_URL
 
-# Global variable for the connection pool
 db_pool = None
 
 def init_db():
     global db_pool
     if db_pool is None:
         try:
-            # Initialize a simple connection pool
             db_pool = pool.SimpleConnectionPool(
-                minconn=1,  # Minimum number of connections in the pool
-                maxconn=10, # Maximum number of connections in the pool
+                minconn=1,
+                maxconn=10,
                 dsn=DATABASE_URL
             )
             print("Database connection pool initialized.")
@@ -28,12 +26,6 @@ def get_db_connection():
 def put_db_connection(conn):
     if db_pool is not None and conn is not None:
         db_pool.putconn(conn)
-
-    # In a production environment with Supabase, tables are typically created via migrations
-    # or the Supabase UI. This function will primarily serve as a placeholder or for
-    # initial setup if running locally against a fresh DB.
-    # The SQL for table creation was already provided to the user.
-    # We'll keep it minimal here, assuming tables exist.
     pass
 
 def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption, tags):
@@ -42,7 +34,6 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Insert file into files table
         cur.execute(
             """
             INSERT INTO files (user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption)
@@ -59,8 +50,6 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
             ),
         )
         
-        # Handle tags
-        # Batch insert tags and file_tags
         tag_data = []
         file_tag_data = []
         for tag_name in tags:
@@ -73,9 +62,9 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
                 (tag_name,)
             )
             tag_id = cur.fetchone()
-            if tag_id: # If tag was actually inserted, use its ID
+            if tag_id:
                 tag_id = tag_id[0]
-            else: # If tag already existed, fetch its ID
+            else:
                 cur.execute("SELECT tag_id FROM tags WHERE tag_name = %s", (tag_name,))
                 tag_id = cur.fetchone()[0]
             file_tag_data.append((file_id, tag_id))
@@ -185,7 +174,6 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
             params.append(new_file_name)
         
         if tags_to_modify is not None and tag_operation is not None:
-            # Get current tags for the file
             cur.execute(
                 """
                 SELECT t.tag_name
@@ -205,9 +193,8 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
             elif tag_operation == "remove":
                 updated_tags = current_tags.difference(set(tags_to_modify))
             else:
-                return 0 # Invalid tag operation
+                return 0
 
-            # Remove old tags not in updated_tags
             tags_to_remove = current_tags.difference(updated_tags)
             if tags_to_remove:
                 cur.execute("SELECT tag_id FROM tags WHERE tag_name IN %s", (tuple(tags_to_remove),))
@@ -219,16 +206,13 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
                         [(file_id, tag_id) for tag_id in tag_ids_to_remove]
                     )
 
-            # Add new tags not in current_tags
             tags_to_add = updated_tags.difference(current_tags)
             if tags_to_add:
-                # Insert new tags into tags table and get their IDs
                 psycopg2.extras.execute_values(
                     cur,
                     "INSERT INTO tags (tag_name) VALUES %s ON CONFLICT (tag_name) DO NOTHING RETURNING tag_id, tag_name",
                     [(tag_name,) for tag_name in tags_to_add]
                 )
-                # Fetch IDs for newly inserted tags and existing ones
                 cur.execute("SELECT tag_id, tag_name FROM tags WHERE tag_name IN %s", (tuple(tags_to_add),))
                 tag_id_map = {row[1]: row[0] for row in cur.fetchall()}
 
@@ -248,7 +232,7 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
                     )
 
         if not update_fields and (tags_to_modify is None or tag_operation is None):
-            return 0  # No fields to update
+            return 0
 
         if update_fields:
             sql = f"UPDATE files SET {', '.join(update_fields)} WHERE user_id = %s AND file_id = %s"
@@ -257,9 +241,8 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
             cur.execute(sql, tuple(params))
             rows_updated = cur.rowcount
         else:
-            rows_updated = 0 # No direct file fields updated, only tags
+            rows_updated = 0
 
-        # Update user's tag count after metadata update
         new_tag_count = _get_user_unique_tag_count(user_id)
         cur.execute("UPDATE users SET tag_count = %s WHERE user_id = %s", (new_tag_count, user_id))
 
@@ -314,7 +297,6 @@ def delete_files(user_id, query):
         conn = get_db_connection()
         cur = conn.cursor()
         search_term = f"%{query}%"
-        # Find file_ids to delete
         cur.execute(
             """
             SELECT DISTINCT f.file_id
@@ -333,14 +315,11 @@ def delete_files(user_id, query):
 
         rows_deleted = 0
         if file_ids_to_delete:
-            # Delete from file_tags
             cur.execute("DELETE FROM file_tags WHERE file_id IN %s", (tuple(file_ids_to_delete),))
             
-            # Delete from files
             cur.execute("DELETE FROM files WHERE user_id = %s AND file_id IN %s", (user_id, tuple(file_ids_to_delete)))
             rows_deleted = cur.rowcount
 
-        # Update user's file count and tag count
         new_file_count = _get_user_file_count(user_id)
         cur.execute("UPDATE users SET upload_count = %s WHERE user_id = %s", (new_file_count, user_id))
         

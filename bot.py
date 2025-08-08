@@ -11,15 +11,11 @@ from telegram.ext import (
 from config import TELEGRAM_TOKEN
 import database as db
 
-# Enable logging for the bot
-# This helps in debugging and monitoring the bot's activity
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-
-# --- Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -137,7 +133,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tags = []
     # If there's a part after '#', extract tags from it
     if len(caption_parts) > 1:
-        # Tags are now space-separated after the first '#'
+        # Tags are space-separated after the first '#'
         tags = [tag.strip() for tag in caption_parts[1].split() if tag.strip()]
 
     # Add file metadata to the database
