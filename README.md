@@ -1,6 +1,16 @@
 ## BackupThing
 
-Telegram bot to back up files with tags, search them, and manage metadata. Files remain on Telegram; metadata lives in Postgres. A tiny Flask server exposes a health check.
+### Project Summary
+
+BackupThing is a Telegram bot that allows users to back up their files with associated tags. The bot provides functionalities to search for files using tags, filenames, or extensions, and to manage file metadata such as names and tags. While the files are stored on Telegram's servers, the metadata is kept in a PostgreSQL database. Additionally, a lightweight Flask web server is included to expose a health check endpoint.
+
+### Tools and Technologies
+
+*   **Backend:** Python
+*   **Telegram Bot Framework:** `python-telegram-bot`
+*   **Database:** PostgreSQL (interfaced with `psycopg2-binary`)
+*   **Web Server:** Flask
+*   **Configuration:** `python-dotenv` for managing environment variables
 
 ### Prerequisites
 
@@ -32,4 +42,3 @@ Telegram bot to back up files with tags, search them, and manage metadata. Files
   - `/tags` — your tags
   - `/delete <query>` — delete by name or `#tag`
   - `/edit <file_query> [name:new] [tags:[add|remove|set] ...]` — rename/retag
-
