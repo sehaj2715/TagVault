@@ -1,4 +1,5 @@
 import logging
+import time
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -17,6 +18,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def resilient(func):
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception:
+            logger.exception("Unhandled exception in handler; continuing")
+            # Do not re-raise; keep bot running
+            return None
+    return wrapper
+
+
+@resilient
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /start command.
@@ -44,6 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@resilient
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /help command.
@@ -62,6 +76,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+@resilient
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles incoming files (documents, photos, videos, audio).
@@ -145,6 +160,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await message.reply_text(f"File '{file_name}' saved with tags: {', '.join(tags)}")
 
 
+@resilient
 async def list_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /tags command.
@@ -160,6 +176,7 @@ async def list_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 PAGE_SIZE = 5 # Number of files to display per page
 
+@resilient
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /files command (formerly /my_files).
@@ -215,6 +232,7 @@ async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("You haven't uploaded any files recently.")
 
 
+@resilient
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /delete command.
@@ -256,6 +274,7 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+@resilient
 async def edit_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles the /edit command.
@@ -363,6 +382,7 @@ async def edit_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Failed to update file '{current_file_name}'.")
 
 
+@resilient
 async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles text messages that are not commands.
@@ -431,6 +451,7 @@ async def search_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"No files found matching '{query}'.")
 
 
+@resilient
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles inline keyboard button presses.
@@ -530,8 +551,20 @@ def main() -> None:
     # Start the web server in a separate thread
     start_web_server_thread()
 
+    # Ensure a token is present; if not, log and back off so supervisor can retry later
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN is missing; retrying in supervisor after 10s")
+        time.sleep(10)
+        return
+
     # Create the Application and pass your bot's token.
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Global error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.exception("Global error handler caught exception", exc_info=context.error)
+
+    application.add_error_handler(error_handler)
 
     # Register command handlers
     application.add_handler(CommandHandler("start", start))
@@ -564,5 +597,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Entry point for the script
-    main()
+    # Entry point with supervisor loop for auto-restart
+    while True:
+        try:
+            main()
+        except Exception:
+            logger.exception("Bot crashed; restarting in 5s")
+            time.sleep(5)

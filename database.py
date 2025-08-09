@@ -1,8 +1,10 @@
+import logging
 import psycopg2
 from psycopg2 import pool, extras
 from config import DATABASE_URL
 
 db_pool = None
+logger = logging.getLogger(__name__)
 
 def init_db():
     global db_pool
@@ -13,26 +15,40 @@ def init_db():
                 maxconn=10,
                 dsn=DATABASE_URL
             )
-            print("Database connection pool initialized.")
+            logger.info("Database connection pool initialized.")
         except Exception as e:
-            print(f"Error initializing connection pool: {e}")
-            raise
+            logger.exception("Error initializing connection pool")
+            db_pool = None
 
 def get_db_connection():
+    global db_pool
     if db_pool is None:
-        raise Exception("Database pool not initialized. Call init_db() first.")
-    return db_pool.getconn()
+        # Try to initialize on-demand; if still unavailable, return None
+        init_db()
+        if db_pool is None:
+            return None
+    try:
+        return db_pool.getconn()
+    except Exception:
+        logger.exception("Failed to get DB connection from pool")
+        return None
 
 def put_db_connection(conn):
     if db_pool is not None and conn is not None:
-        db_pool.putconn(conn)
-    pass
+        try:
+            db_pool.putconn(conn)
+        except Exception:
+            logger.exception("Failed to return DB connection to pool")
+    # No raise; be resilient
 
 def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_file_category, caption, tags):
     conn = None
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("add_file skipped: DB unavailable")
+            return
         cur = conn.cursor()
         cur.execute(
             """
@@ -80,11 +96,14 @@ def add_file(user_id, file_id, file_name, file_extension, file_type, telegram_fi
             )
 
         conn.commit()
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error adding file: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error adding file")
+        # swallow
     finally:
         if cur:
             cur.close()
@@ -97,6 +116,9 @@ def find_files(user_id, query, limit=None, offset=0):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("find_files: DB unavailable")
+            return []
         cur = conn.cursor()
         search_term = f"%{query}%"
         sql_query = """
@@ -122,9 +144,9 @@ def find_files(user_id, query, limit=None, offset=0):
         cur.execute(sql_query, tuple(params))
         files = cur.fetchall()
         return files
-    except Exception as e:
-        print(f"Error finding files: {e}")
-        raise
+    except Exception:
+        logger.exception("Error finding files")
+        return []
     finally:
         if cur:
             cur.close()
@@ -137,6 +159,9 @@ def get_all_tags(user_id):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("get_all_tags: DB unavailable")
+            return []
         cur = conn.cursor()
         cur.execute(
             """
@@ -150,9 +175,9 @@ def get_all_tags(user_id):
         )
         tags_list = [row[0] for row in cur.fetchall()]
         return sorted(list(set(tags_list)))
-    except Exception as e:
-        print(f"Error getting all tags: {e}")
-        raise
+    except Exception:
+        logger.exception("Error getting all tags")
+        return []
     finally:
         if cur:
             cur.close()
@@ -165,6 +190,9 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("update_file_metadata: DB unavailable")
+            return 0
         cur = conn.cursor()
         update_fields = []
         params = []
@@ -248,11 +276,14 @@ def update_file_metadata(user_id, file_id, new_file_name=None, tags_to_modify=No
 
         conn.commit()
         return rows_updated
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error updating file metadata: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error updating file metadata")
+        return 0
     finally:
         if cur:
             cur.close()
@@ -265,6 +296,9 @@ def get_recent_files(user_id, limit=10, offset=0):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("get_recent_files: DB unavailable")
+            return []
         cur = conn.cursor()
         cur.execute(
             """
@@ -280,9 +314,9 @@ def get_recent_files(user_id, limit=10, offset=0):
         )
         files = cur.fetchall()
         return files
-    except Exception as e:
-        print(f"Error getting recent files: {e}")
-        raise
+    except Exception:
+        logger.exception("Error getting recent files")
+        return []
     finally:
         if cur:
             cur.close()
@@ -295,6 +329,9 @@ def delete_files(user_id, query):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("delete_files: DB unavailable")
+            return 0
         cur = conn.cursor()
         search_term = f"%{query}%"
         cur.execute(
@@ -328,11 +365,14 @@ def delete_files(user_id, query):
 
         conn.commit()
         return rows_deleted
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error deleting files: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error deleting files")
+        return 0
     finally:
         if cur:
             cur.close()
@@ -345,13 +385,16 @@ def get_user(user_id):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("get_user: DB unavailable")
+            return None
         cur = conn.cursor()
         cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
         user = cur.fetchone()
         return user
-    except Exception as e:
-        print(f"Error getting user: {e}")
-        raise
+    except Exception:
+        logger.exception("Error getting user")
+        return None
     finally:
         if cur:
             cur.close()
@@ -364,6 +407,9 @@ def add_user(user_id, username):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("add_user skipped: DB unavailable")
+            return
         cur = conn.cursor()
         cur.execute(
             """
@@ -373,11 +419,14 @@ def add_user(user_id, username):
             (user_id, username),
         )
         conn.commit()
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error adding user: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error adding user")
+        # swallow
     finally:
         if cur:
             cur.close()
@@ -390,16 +439,22 @@ def update_user_subscription(user_id, plan_name):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("update_user_subscription skipped: DB unavailable")
+            return
         cur = conn.cursor()
         cur.execute(
             "UPDATE users SET subscription_plan = %s WHERE user_id = %s", (plan_name, user_id)
         )
         conn.commit()
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error updating user subscription: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error updating user subscription")
+        # swallow
     finally:
         if cur:
             cur.close()
@@ -412,17 +467,23 @@ def record_upload(user_id):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("record_upload skipped: DB unavailable")
+            return
         cur = conn.cursor()
         cur.execute(
             "UPDATE users SET upload_count = upload_count + 1, last_active = NOW() WHERE user_id = %s",
             (user_id,),
         )
         conn.commit()
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error recording upload: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error recording upload")
+        # swallow
     finally:
         if cur:
             cur.close()
@@ -435,17 +496,23 @@ def record_tag_usage(user_id, num_tags):
     cur = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            logger.error("record_tag_usage skipped: DB unavailable")
+            return
         cur = conn.cursor()
         cur.execute(
             "UPDATE users SET tag_count = tag_count + %s, last_active = NOW() WHERE user_id = %s",
             (num_tags, user_id),
         )
         conn.commit()
-    except Exception as e:
+    except Exception:
         if conn:
-            conn.rollback()
-        print(f"Error recording tag usage: {e}")
-        raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("Error recording tag usage")
+        # swallow
     finally:
         if cur:
             cur.close()
@@ -454,20 +521,29 @@ def record_tag_usage(user_id, num_tags):
 
 def _get_user_file_count(user_id):
     conn = get_db_connection()
+    if conn is None:
+        logger.error("_get_user_file_count: DB unavailable")
+        return 0
     cur = conn.cursor()
     try:
         cur.execute("SELECT COUNT(*) FROM files WHERE user_id = %s", (user_id,))
         count = cur.fetchone()[0]
         return count
-    except Exception as e:
-        print(f"Error getting user file count: {e}")
-        raise
+    except Exception:
+        logger.exception("Error getting user file count")
+        return 0
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
+        put_db_connection(conn)
 
 def _get_user_unique_tag_count(user_id):
     conn = get_db_connection()
+    if conn is None:
+        logger.error("_get_user_unique_tag_count: DB unavailable")
+        return 0
     cur = conn.cursor()
     try:
         cur.execute(
@@ -482,9 +558,12 @@ def _get_user_unique_tag_count(user_id):
         )
         count = cur.fetchone()[0]
         return count
-    except Exception as e:
-        print(f"Error getting user unique tag count: {e}")
-        raise
+    except Exception:
+        logger.exception("Error getting user unique tag count")
+        return 0
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
+        put_db_connection(conn)
