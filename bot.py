@@ -50,7 +50,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Send welcome message with the inline keyboard
     await update.message.reply_text(
-        "Welcome to BackupThing!\n"
+        "Welcome to TagVault!\n"
         "Your personal file backup and retrieval system.\n"
         "What would you like to do?",
         reply_markup=reply_markup,

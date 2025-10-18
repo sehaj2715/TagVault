@@ -1,8 +1,8 @@
-## BackupThing
+## TagVault
 
 ### Project Summary
 
-BackupThing is a Telegram bot that allows users to back up their files with associated tags. The bot provides functionalities to search for files using tags, filenames, or extensions, and to manage file metadata such as names and tags. While the files are stored on Telegram's servers, the metadata is kept in a PostgreSQL database. Additionally, a lightweight Flask web server is included to expose a health check endpoint.
+TagVault is a Telegram bot that allows users to back up their files with associated tags. The bot provides functionalities to search for files using tags, filenames, or extensions, and to manage file metadata such as names and tags. While the files are stored on Telegram's servers, the metadata is kept in a PostgreSQL database. Additionally, a lightweight Flask web server is included to expose a health check endpoint.
 
 ### Tools and Technologies
 
